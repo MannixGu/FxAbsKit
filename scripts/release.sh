@@ -22,10 +22,45 @@ set -euo pipefail
 
 # ---------- 颜色 ----------
 RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; BLUE=$'\033[34m'; RESET=$'\033[0m'
-log()  { printf "%s[release]%s %s\n" "$BLUE"  "$RESET" "$*"; }
-ok()   { printf "%s[  ok  ]%s %s\n" "$GREEN" "$RESET" "$*"; }
-warn() { printf "%s[ warn ]%s %s\n" "$YELLOW" "$RESET" "$*"; }
-die()  { printf "%s[ fail ]%s %s\n" "$RED"   "$RESET" "$*" >&2; exit 1; }
+# 全部走 stderr: stdout 留给真实数据 (例如 $(git_net ...) 的命令替换)
+log()  { printf "%s[release]%s %s\n" "$BLUE"   "$RESET" "$*" >&2; }
+ok()   { printf "%s[  ok  ]%s %s\n" "$GREEN"  "$RESET" "$*" >&2; }
+warn() { printf "%s[ warn ]%s %s\n" "$YELLOW" "$RESET" "$*" >&2; }
+die()  { printf "%s[ fail ]%s %s\n" "$RED"    "$RESET" "$*" >&2; exit 1; }
+
+# ---------- git 网络重试 ----------
+# GitHub 偶尔出 "HTTP2 framing layer" 错误，第一次失败时降级到 HTTP/1.1 重试一次。
+git_net() {
+  if git "$@"; then return 0; fi
+  warn "git $* 失败，使用 HTTP/1.1 重试"
+  git -c http.version=HTTP/1.1 "$@"
+}
+
+# ---------- 失败回滚指引 ----------
+# 跟踪每一步状态，脚本意外退出时打印对应的回滚命令，让用户能精准恢复。
+DID_COMMIT=0; DID_TAG=0; DID_PUSH_BRANCH=0; DID_PUSH_TAG=0; DID_RELEASE=0
+
+print_recovery() {
+  local -a hints=()
+  [[ $DID_RELEASE     -eq 1 ]] && hints+=("  删 GitHub release : gh release delete ${VERSION} --repo ${OWNER}/${REPO} --yes")
+  [[ $DID_PUSH_TAG    -eq 1 ]] && hints+=("  删远端 tag        : git push origin :refs/tags/${VERSION}")
+  [[ $DID_PUSH_BRANCH -eq 1 ]] && hints+=("  回滚远端分支      : git push --force-with-lease origin HEAD~1:${BRANCH}")
+  [[ $DID_TAG         -eq 1 ]] && hints+=("  删本地 tag        : git tag -d ${VERSION}")
+  [[ $DID_COMMIT      -eq 1 ]] && hints+=("  撤销本地 commit   : git reset --hard HEAD~1")
+  if [[ ${#hints[@]} -gt 0 ]]; then
+    printf "\n%s[回滚指引]%s 发布中断，按 *从上到下* 的顺序执行以恢复:\n" "$YELLOW" "$RESET" >&2
+    printf "%s\n" "${hints[@]}" >&2
+    printf "\n" >&2
+  fi
+}
+
+cleanup() {
+  local rc=$?
+  [[ -n "${WORK_DIR:-}" ]] && rm -rf "$WORK_DIR"
+  [[ $rc -ne 0 ]] && print_recovery
+  return $rc
+}
+trap cleanup EXIT
 
 # ---------- 参数解析 ----------
 ZIP_INPUT=""
@@ -91,7 +126,10 @@ fi
 if git rev-parse -q --verify "refs/tags/${VERSION}" >/dev/null; then
   die "本地已存在 tag ${VERSION}，请换版本号或先删除该 tag"
 fi
-if git ls-remote --tags origin "refs/tags/${VERSION}" | grep -q "${VERSION}$"; then
+# 显式判错: ls-remote 网络失败不能当作"远端没 tag"误放过去
+REMOTE_TAGS="$(git_net ls-remote --tags origin "refs/tags/${VERSION}")" \
+  || die "查询远端 tag 失败 (网络问题?)，请稍后重试"
+if echo "$REMOTE_TAGS" | grep -q "refs/tags/${VERSION}$"; then
   die "远端已存在 tag ${VERSION}"
 fi
 if gh release view "${VERSION}" --repo "${OWNER}/${REPO}" >/dev/null 2>&1; then
@@ -101,7 +139,6 @@ fi
 # ---------- 准备 zip ----------
 ZIP_NAME="abs.xcframework_${VERSION}.zip"
 WORK_DIR="$(mktemp -d -t fxabskit-release-XXXX)"
-trap 'rm -rf "$WORK_DIR"' EXIT
 ZIP_PATH="${WORK_DIR}/${ZIP_NAME}"
 cp "$ZIP_INPUT" "$ZIP_PATH"
 log "zip: $ZIP_PATH"
@@ -163,14 +200,20 @@ read -r -p "确认执行? [y/N] " ans
 # ---------- commit / tag / push ----------
 git add "$PKG"
 git commit -m "chore: release ${VERSION}"
+DID_COMMIT=1
 ok "已 commit"
 
 git tag -a "${VERSION}" -m "Release ${VERSION}"
+DID_TAG=1
 ok "已打 tag ${VERSION}"
 
-git push origin "${BRANCH}"
-git push origin "${VERSION}"
-ok "已 push 分支与 tag"
+git_net push origin "${BRANCH}" || die "push 分支失败，请按下方回滚指引处理"
+DID_PUSH_BRANCH=1
+ok "已 push ${BRANCH}"
+
+git_net push origin "${VERSION}" || die "push tag 失败，请按下方回滚指引处理"
+DID_PUSH_TAG=1
+ok "已 push tag ${VERSION}"
 
 # ---------- gh release ----------
 REL_ARGS=( "${VERSION}" "$ZIP_PATH" --repo "${OWNER}/${REPO}" --title "${VERSION}" )
@@ -180,7 +223,8 @@ else
   REL_ARGS+=( --generate-notes )
 fi
 
-gh release create "${REL_ARGS[@]}"
+gh release create "${REL_ARGS[@]}" || die "gh release 创建失败，请按下方回滚指引处理"
+DID_RELEASE=1
 ok "release 已发布: https://github.com/${OWNER}/${REPO}/releases/tag/${VERSION}"
 
 cat <<EOF
