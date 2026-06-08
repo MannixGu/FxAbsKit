@@ -16,8 +16,8 @@ let package = Package(
         // Targets can depend on other targets in this package and products from dependencies.
         .binaryTarget(
             name: "abs",
-            url: "https://github.com/MannixGu/FxAbsKit/releases/download/1.0.0/abs.xcframework_1.0.0.zip",
-            checksum: "173d3c9737a2266bfa3584ffa20147b01e8d0cf83a0c35f5ebecfb45668cdf86"
+            url: "https://github.com/MannixGu/FxAbsKit/releases/download/1.1.1/abs.xcframework_1.1.1.zip",
+            checksum: "10c140cceb0d696200fe1ec245ab8853ddf5b2c486efb5bfa5ab5715236259fe"
         ),
     ]
 )
