@@ -88,3 +88,26 @@ https://github.com/yourname/MyFrameworkSPM/releases/download/1.0.0/MyFramework.z
 git tag 1.0.0
 git push origin 1.0.0
 ```
+
+### 一键发布脚本
+
+上面的步骤已经封装成 `scripts/release.sh`，传入打包好的 zip 与版本号即可完成 计算 checksum → 改 Package.swift → commit → 打 tag → push → 创建 GitHub Release（并上传 zip） 全流程。
+
+依赖：`gh`（`brew install gh` 并 `gh auth login`）、`swift`、`python3`。
+
+```shell
+# 干跑（不会改任何 git 状态，验证 checksum 与 Package.swift 替换效果）
+scripts/release.sh ~/Downloads/abs.xcframework.zip 1.0.1 --dry-run
+
+# 正式发布（自动用 main 分支 commit 并打 tag）
+scripts/release.sh ~/Downloads/abs.xcframework.zip 1.0.1
+
+# 自定义 release notes（默认使用 gh --generate-notes）
+scripts/release.sh ~/Downloads/abs.xcframework.zip 1.0.1 --notes "修复 xxx"
+```
+
+脚本会：
+- 从 `git remote get-url origin` 推导 owner/repo，无需手填
+- 将 zip 重命名为 `abs.xcframework_<version>.zip` 后上传
+- 拒绝重复版本（本地 tag、远端 tag、远端 release 任一存在都会中止）
+- 失败或取消时自动回滚 Package.swift 的本地修改
